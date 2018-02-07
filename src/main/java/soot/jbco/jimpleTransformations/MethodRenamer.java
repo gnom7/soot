@@ -19,13 +19,6 @@
 
 package soot.jbco.jimpleTransformations;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Stream;
-
 import soot.Body;
 import soot.FastHierarchy;
 import soot.G;
@@ -44,11 +37,18 @@ import soot.jbco.util.BodyBuilder;
 import soot.jbco.util.Rand;
 import soot.jimple.InvokeExpr;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+
 import static java.util.stream.Collectors.toList;
 
 /**
  * @author Michael Batchelder
- * 
+ *
  *         Created on 24-Jan-2006
  */
 public class MethodRenamer extends SceneTransformer implements IJbcoTransform {
@@ -56,7 +56,7 @@ public class MethodRenamer extends SceneTransformer implements IJbcoTransform {
 	public static String name = "wjtp.jbco_mr";
 	public static String dependancies[] = new String[]{"wjtp.jbco_mr"};
 
-	public static HashMap<String, String> oldToNewMethodNames = new HashMap<>();
+	public static Map<String, String> oldToNewMethodNames = new HashMap<>();
 
 	private static final char stringChars[][] = {{'S', '5', '$'}, {'l', '1', 'I'}, {'_'}};
 	private static Hierarchy hierarchy;
@@ -142,28 +142,41 @@ public class MethodRenamer extends SceneTransformer implements IJbcoTransform {
 		}
 
 		// iterate through application classes, update references of renamed methods
-		for (SootClass c : scene.getApplicationClasses()) {
+        updateMethodNamesInRefs(oldToNewMethodNames);
+
+		scene.releaseActiveHierarchy();
+		scene.getActiveHierarchy();
+		scene.setFastHierarchy(new FastHierarchy());
+	}
+
+    /**
+     * Iterate through application classes, update references of renamed methods.
+     *
+     * @param oldToNewMethodNames map of old to new method names
+     */
+	public static void updateMethodNamesInRefs(Map<String, String> oldToNewMethodNames) {
+        for (SootClass c : Scene.v().getApplicationClasses()) {
             final List<SootMethod> methods = new ArrayList<>(c.getMethods());
             for (SootMethod m : methods) {
-				if (!m.isConcrete() || m.getDeclaringClass().isLibraryClass()) {
-					continue;
-				}
-				Body body;
-				try {
-					body = m.getActiveBody();
-				} catch (Exception exc) {
-					// no active body present
-					continue;
-				}
-				for (Unit unit : body.getUnits()) {
-					for (ValueBox valueBox : unit.getUseBoxes()) {
-						Value v = valueBox.getValue();
-						if (!(v instanceof InvokeExpr)) {
-							continue;
-						}
+                if (!m.isConcrete() || m.getDeclaringClass().isLibraryClass()) {
+                    continue;
+                }
+                Body body;
+                try {
+                    body = m.getActiveBody();
+                } catch (Exception exc) {
+                    // no active body present
+                    continue;
+                }
+                for (Unit unit : body.getUnits()) {
+                    for (ValueBox valueBox : unit.getUseBoxes()) {
+                        Value v = valueBox.getValue();
+                        if (!(v instanceof InvokeExpr)) {
+                            continue;
+                        }
 
-						InvokeExpr invokeExpr = (InvokeExpr) v;
-						SootMethodRef methodRef = invokeExpr.getMethodRef();
+                        InvokeExpr invokeExpr = (InvokeExpr) v;
+                        SootMethodRef methodRef = invokeExpr.getMethodRef();
 
                         // if the method won't be resolved in declaring class by subsignature of method ref,
                         // then we know it was renamed and update that method ref with new name
@@ -171,24 +184,20 @@ public class MethodRenamer extends SceneTransformer implements IJbcoTransform {
                             continue;
                         }
 
-						String newName = oldToNewMethodNames.get(methodRef.name());
-						if (newName == null) {
-							continue;
-						}
+                        String newName = oldToNewMethodNames.get(methodRef.name());
+                        if (newName == null) {
+                            continue;
+                        }
 
-						methodRef = scene.makeMethodRef(methodRef.declaringClass(), newName,
-								methodRef.parameterTypes(), methodRef.returnType(),
-								methodRef.isStatic());
+                        methodRef = Scene.v().makeMethodRef(methodRef.declaringClass(), newName,
+                                methodRef.parameterTypes(), methodRef.returnType(),
+                                methodRef.isStatic());
                         invokeExpr.setMethodRef(methodRef);
-					}
-				}
-			}
-		}
-
-		scene.releaseActiveHierarchy();
-		scene.getActiveHierarchy();
-		scene.setFastHierarchy(new FastHierarchy());
-	}
+                    }
+                }
+            }
+        }
+    }
 
 	/*
 	 * @return String newly generated junk name that DOES NOT exist yet

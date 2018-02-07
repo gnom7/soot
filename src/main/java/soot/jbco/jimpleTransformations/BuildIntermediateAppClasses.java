@@ -25,7 +25,6 @@ import soot.Hierarchy;
 import soot.Local;
 import soot.Modifier;
 import soot.PatchingChain;
-import soot.PrimType;
 import soot.Scene;
 import soot.SceneTransformer;
 import soot.SootClass;
@@ -39,10 +38,8 @@ import soot.VoidType;
 import soot.jbco.IJbcoTransform;
 import soot.jbco.Main;
 import soot.jbco.util.BodyBuilder;
-import soot.jimple.IntConstant;
 import soot.jimple.Jimple;
 import soot.jimple.JimpleBody;
-import soot.jimple.NullConstant;
 import soot.jimple.SpecialInvokeExpr;
 import soot.jimple.ThisRef;
 import soot.util.Chain;
@@ -55,13 +52,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static java.util.stream.Collectors.toSet;
 import static soot.SootMethod.constructorName;
 
 /**
  * @author Michael Batchelder
- * 
+ *
  *         Created on 1-Feb-2006
- * 
+ *
  *         This class builds buffer classes between Application classes and
  *         their corresponding library superclasses. This allows for the hiding
  *         of all library method overrides to be hidden in a different class,
@@ -97,7 +95,9 @@ public class BuildIntermediateAppClasses extends SceneTransformer implements IJb
 		BodyBuilder.retrieveAllBodies();
 
 		// iterate through application classes, build intermediate classes
+        // rename library methods in mediating classes
 		Iterator<SootClass> it = Scene.v().getApplicationClasses().snapshotIterator();
+        Map<String, String> oldToNewMethodNames = new HashMap<>();
 		while (it.hasNext()) {
 			List<SootMethod> initMethodsToRewrite = new ArrayList<>();
 			Map<String, SootMethod> methodsToAdd = new HashMap<>();
@@ -159,37 +159,15 @@ public class BuildIntermediateAppClasses extends SceneTransformer implements IJb
 
                 for (String subSig : methodsToAdd.keySet()) {
                     SootMethod originalSuperclassMethod = methodsToAdd.get(subSig);
+                    String originalMethodName = originalSuperclassMethod.getName();
+                    String originalMethodSubSig = originalSuperclassMethod.getSubSignature();
                     List<Type> paramTypes = originalSuperclassMethod.getParameterTypes();
                     Type returnType = originalSuperclassMethod.getReturnType();
                     List<SootClass> exceptions = originalSuperclassMethod.getExceptions();
                     int modifiers = originalSuperclassMethod.getModifiers() & ~Modifier.ABSTRACT & ~Modifier.NATIVE;
                     SootMethod newMethod;
                     { // build new junk method to call original method
-                        String newMethodName = MethodRenamer.getNewName();
-                        newMethod = Scene.v().makeSootMethod(newMethodName, paramTypes, returnType,
-                                modifiers, exceptions);
-                        mediatingClass.addMethod(newMethod);
-
-                        Body body = Jimple.v().newBody(newMethod);
-                        newMethod.setActiveBody(body);
-                        Chain<Local> locals = body.getLocals();
-                        PatchingChain<Unit> units = body.getUnits();
-
-                        BodyBuilder.buildThisLocal(units, thisRef, locals);
-                        BodyBuilder.buildParameterLocals(units, locals, paramTypes);
-
-                        if (returnType instanceof VoidType) {
-                            units.add(Jimple.v().newReturnVoidStmt());
-                        } else if (returnType instanceof PrimType) {
-                            units.add(Jimple.v().newReturnStmt(IntConstant.v(0)));
-                        } else {
-                            units.add(Jimple.v().newReturnStmt(NullConstant.v()));
-                        }
-                        newmethods++;
-                    } // end build new junk method to call original method
-
-                    { // build copy of old method
-                        newMethod = Scene.v().makeSootMethod(originalSuperclassMethod.getName(), paramTypes, returnType,
+                        newMethod = Scene.v().makeSootMethod(originalMethodName, paramTypes, returnType,
                                 modifiers, exceptions);
                         mediatingClass.addMethod(newMethod);
 
@@ -201,22 +179,23 @@ public class BuildIntermediateAppClasses extends SceneTransformer implements IJb
                         Local ths = BodyBuilder.buildThisLocal(units, thisRef, locals);
                         List<Local> args = BodyBuilder.buildParameterLocals(units, locals, paramTypes);
 
-                        SootMethodRef superclassMethodRef = originalSuperclassMethod.makeRef();
                         if (returnType instanceof VoidType) {
                             units.add(Jimple.v()
-                                    .newInvokeStmt(Jimple.v().newSpecialInvokeExpr(ths, superclassMethodRef, args)));
+                                    .newInvokeStmt(Jimple.v().newVirtualInvokeExpr(ths, newMethod.makeRef(), args)));
                             units.add(Jimple.v().newReturnVoidStmt());
                         } else {
                             Local loc = Jimple.v().newLocal("retValue", returnType);
                             body.getLocals().add(loc);
 
                             units.add(Jimple.v().newAssignStmt(loc,
-                                    Jimple.v().newSpecialInvokeExpr(ths, superclassMethodRef, args)));
+                                    Jimple.v().newVirtualInvokeExpr(ths, newMethod.makeRef(), args)));
 
                             units.add(Jimple.v().newReturnStmt(loc));
                         }
+
+                        renameLibraryMethodInMediatingClass(newMethod);
                         newmethods++;
-                    } // end build copy of old method
+                    } // end build new junk method to call original method
                 }
 				sc.setSuperclass(mediatingClass);
 
@@ -285,5 +264,39 @@ public class BuildIntermediateAppClasses extends SceneTransformer implements IJb
             }
         }
         return Optional.empty();
+    }
+
+    private void renameLibraryMethodInMediatingClass(SootMethod method) {
+        SootClass mediatingClass = method.getDeclaringClass();
+        String originalMethodName = method.getName();
+
+        String newMethodName = createNewMethodNameUniqueAcrossAllSubclassesFor(method);
+
+        Hierarchy hierarchy = Scene.v().getActiveHierarchy();
+        hierarchy.getSubclassesOf(mediatingClass).stream()
+                .map(SootClass::getMethods)
+                .flatMap(Collection::stream)
+                .filter(m -> m.getName().equals(originalMethodName))
+                .forEach(m -> m.setName(newMethodName));
+
+        MethodRenamer.updateMethodNamesInRefs(new HashMap<String, String>() {{put(originalMethodName, newMethodName);}});
+    }
+
+    private String createNewMethodNameUniqueAcrossAllSubclassesFor(SootMethod method) {
+        SootClass declaringClass = method.getDeclaringClass();
+        String newMethodName;
+        do {
+            newMethodName = MethodRenamer.getNewName();
+        } while (!isUniqueMethodNameInSubclassesOf(declaringClass, newMethodName));
+        return newMethodName;
+    }
+
+    private boolean isUniqueMethodNameInSubclassesOf(SootClass sc, String methodName) {
+        Hierarchy hierarchy = Scene.v().getActiveHierarchy();
+        return hierarchy.getSubclassesOf(sc).stream()
+                .map(SootClass::getMethods)
+                .flatMap(Collection::stream)
+                .map(SootMethod::getName)
+                .noneMatch(name -> name.equals(methodName));
     }
 }
